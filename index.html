@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ModelClash</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --ink: #14171d;
+    --muted: #6a7280;
+    --surface: #ffffff;
+    --border: #e3e6ec;
+    --signal: #2740ff;          /* single UI accent */
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    /* series palette — distinguishable, color-blind-friendlier */
+    --s0: #2740ff;
+    --s1: #d6336c;
+    --s2: #0a8f5b;
+    --s3: #d9810a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 6px;
+  }
+  h1 {
+    font-size: clamp(28px, 5vw, 44px);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin: 0 0 4px;
+  }
+  .sub { color: var(--muted); margin: 0 0 28px; font-size: 15px; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+  }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px 28px;
+    align-items: flex-end;
+    margin-bottom: 18px;
+  }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .field input[type="date"] {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 13px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 7px 12px 7px 10px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+    transition: opacity .15s ease, background .15s ease;
+  }
+  .chip .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .chip .val { color: var(--muted); font-size: 12px; }
+  .chip[aria-pressed="false"] { opacity: 0.4; }
+
+  .chartbox { position: relative; height: 420px; margin-top: 8px; }
+
+  .foot {
+    margin-top: 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .err { color: var(--s1); font-family: var(--mono); font-size: 14px; }
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <p class="eyebrow">Daily benchmark</p>
+    <h1>ModelClash</h1>
+    <p class="sub">Scores updated daily. Adjust the window or mute a contender — the data underneath never changes.</p>
+
+    <section class="panel">
+      <div class="controls">
+        <div class="field">
+          <label for="from">From</label>
+          <input type="date" id="from" />
+        </div>
+        <div class="field">
+          <label for="to">To</label>
+          <input type="date" id="to" />
+        </div>
+        <div class="field" style="flex:1; min-width:220px;">
+          <label>Contenders</label>
+          <div class="chips" id="chips"></div>
+        </div>
+      </div>
+
+      <div class="chartbox"><canvas id="chart"></canvas></div>
+      <p class="foot" id="foot"></p>
+    </section>
+  </main>
+
+<script>
+const SERIES_COLORS = ["--s0", "--s1", "--s2", "--s3"];
+const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+// --- minimal CSV parser (handles plain comma-separated values) ---
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const header = lines[0].split(",");
+  const rows = lines.slice(1).map(line => line.split(","));
+  return { header, rows };
+}
+
+let chart, full;
+
+async function init() {
+  let raw;
+  try {
+    const res = await fetch("data.csv", { cache: "no-cache" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    raw = await res.text();
+  } catch (e) {
+    document.getElementById("foot").innerHTML =
+      '<span class="err">Couldn\'t load data.csv (' + e.message + '). Make sure it sits next to index.html.</span>';
+    return;
+  }
+
+  const { header, rows } = parseCSV(raw);
+  const labels = rows.map(r => r[0]);
+  const seriesNames = header.slice(1);
+
+  full = {
+    labels,
+    series: seriesNames.map((name, i) => ({
+      name,
+      color: cssVar(SERIES_COLORS[i % SERIES_COLORS.length]),
+      values: rows.map(r => parseFloat(r[i + 1])),
+    })),
+  };
+
+  // date inputs default to full range
+  document.getElementById("from").value = labels[0];
+  document.getElementById("to").value = labels[labels.length - 1];
+  document.getElementById("from").addEventListener("change", render);
+  document.getElementById("to").addEventListener("change", render);
+
+  buildChips();
+  buildChart();
+  render();
+}
+
+function buildChips() {
+  const box = document.getElementById("chips");
+  box.innerHTML = "";
+  full.series.forEach((s, i) => {
+    const chip = document.createElement("button");
+    chip.className = "chip";
+    chip.setAttribute("aria-pressed", "true");
+    chip.dataset.idx = i;
+    chip.innerHTML =
+      '<span class="dot" style="background:' + s.color + '"></span>' +
+      '<span>' + s.name + '</span><span class="val"></span>';
+    chip.addEventListener("click", () => {
+      const on = chip.getAttribute("aria-pressed") === "true";
+      chip.setAttribute("aria-pressed", on ? "false" : "true");
+      chart.setDatasetVisibility(i, !on);
+      chart.update();
+    });
+    box.appendChild(chip);
+  });
+}
+
+function buildChart() {
+  const ctx = document.getElementById("chart");
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: full.series.map(s => ({
+        label: s.name,
+        data: [],
+        borderColor: s.color,
+        backgroundColor: s.color,
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        tension: 0.25,
+      })),
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+        y: { grid: { color: "rgba(0,0,0,0.05)" }, ticks: { font: { family: cssVar("--mono") } } },
+      },
+    },
+  });
+}
+
+function render() {
+  const from = document.getElementById("from").value;
+  const to = document.getElementById("to").value;
+
+  const idx = full.labels
+    .map((d, i) => ({ d, i }))
+    .filter(o => o.d >= from && o.d <= to)
+    .map(o => o.i);
+
+  chart.data.labels = idx.map(i => full.labels[i]);
+  full.series.forEach((s, si) => {
+    chart.data.datasets[si].data = idx.map(i => s.values[i]);
+    // update chip readout with last value in the window
+    const valEl = document.querySelectorAll(".chip .val")[si];
+    if (valEl) valEl.textContent = idx.length ? s.values[idx[idx.length - 1]].toFixed(1) : "–";
+  });
+  chart.update();
+
+  document.getElementById("foot").textContent =
+    idx.length + " of " + full.labels.length + " days shown · " + from + " → " + to;
+}
+
+init();
+</script>
+</body>
+</html>

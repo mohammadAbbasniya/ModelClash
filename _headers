@@ -1,0 +1,6 @@
+# Cloudflare Pages reads this file from the deploy root.
+# The CSV changes once a day — let edge + browser cache briefly, then revalidate.
+/data.csv
+  Cache-Control: public, max-age=300, must-revalidate
+
+# Long-lived libraries / assets can cache hard (add hashed asset files here later).
